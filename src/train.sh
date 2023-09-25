@@ -46,6 +46,8 @@ deepspeed main.py \
    --zero_stage $ZERO_STAGE \
    --deepspeed \
    --output_dir $OUTPUT \
+   --lora_dim 128 \
+   --lora_module_name "layers." \
    
 #   --model_name_or_path TheBloke/Llama-2-13B-fp16 \
 #   --model_name_or_path /tmp/Llama-2-13B-fp16/ \

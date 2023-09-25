@@ -1,3 +1,10 @@
+# DeepSpeedChat on Amazon SageMaker
+This repository contains demo code and Jupyter Notebook for using Sagemaker training job for finetuning LLM (lora and full parameter tunning), Sagemaker endpoints for inferencing LLM with vLLM, PagedAttention and continusing batching (rolling batch).
+
+Use [DeepSpeedChat-training-on-SageMaker.ipynb](./DeepSpeedChat-training-on-SageMaker.ipynb) as the starting point for preparing the docker images, base model, training dataset and the whole training process.
+
+The best way to run this notebook is through **SageMaker Notebook instance** (No GPU is needed, as GPU will be used through SageMaker training job), otherwise you will need to configure the access to Amazon S3, ECR (Elastic Container Registry) and Amazon SageMaker training job/endpoints.
+
 # DeepSpeed Examples
 This repository contains various examples including training, inference, compression, benchmarks, and applications that use [DeepSpeed](https://github.com/microsoft/DeepSpeed).
 
