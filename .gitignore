@@ -129,3 +129,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+#sample dataset
+src/DeepSpeed-Chat/data
+model/
+local_testing.ipynb
