@@ -8,12 +8,14 @@ import os
 
 # The template prompt dataset class that all new dataset porting needs to
 # follow in order to have a unified API and unified data format.
-class ChatRawDataset(object):
+class PromptRawDataset(object):
 
     def __init__(self, output_path, seed, local_rank, dataset_name):
         self.output_path = output_path
         self.seed = seed
         self.local_rank = local_rank
+        if not dataset_name == 'local/jsonfile':
+            self.raw_datasets = load_dataset(dataset_name)
 
     def get_train_data(self):
         return
@@ -27,7 +29,7 @@ class ChatRawDataset(object):
 
 
 
-class LocalJsonFileDataset(ChatRawDataset):
+class LocalJsonFileDataset(PromptRawDataset):
 
     def __init__(self, output_path, seed, local_rank, dataset_name, chat_path):
         super().__init__(output_path, seed, local_rank, dataset_name)
@@ -35,8 +37,10 @@ class LocalJsonFileDataset(ChatRawDataset):
         self.dataset_name_clean = "jsonfile"
         self.raw_datasets = load_dataset('json',
                                          data_files={
-                                             "train": os.path.join(chat_path, 'train.json'),
-                                             "eval": os.path.join(chat_path, 'eval.json'),
+                                             "train":
+                                             chat_path + '/data/train.json',
+                                             "eval":
+                                             chat_path + '/data/eval.json'
                                          })
 
     def get_train_data(self):

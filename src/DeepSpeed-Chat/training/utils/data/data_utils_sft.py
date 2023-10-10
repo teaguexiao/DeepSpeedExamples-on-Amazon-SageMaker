@@ -15,15 +15,21 @@ from . import raw_datasets_sft
 
 
 def get_raw_dataset(dataset_name, output_path, seed, local_rank):
-
-    if not (os.path.isfile(os.path.join(dataset_name, 'train.json'))
-            and os.path.isfile(os.path.join(dataset_name, 'eval.json'))):
+    if "local/jsonfile" in dataset_name:
+        chat_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), os.path.pardir,
+                         os.path.pardir, os.path.pardir))
+        if not (os.path.isfile(chat_path + '/data/train.json')
+                and os.path.isfile(chat_path + '/data/eval.json')):
+            raise RuntimeError(
+                f"Please check both the train.json and eval.json files in your applications/DeepSpeed-Chat/data directory."
+            )
+        return raw_datasets_sft.LocalJsonFileDataset(output_path, seed, local_rank,
+                                                 dataset_name, chat_path)
+    else:
         raise RuntimeError(
-            f"Please check both the train.json and eval.json files in your {dataset_name} directory."
+            f"We do not have configs for dataset {dataset_name}, but you can add it by yourself in raw_datasets.py."
         )
-    return raw_datasets_sft.LocalJsonFileDataset(output_path, seed, local_rank,
-                                                dataset_name, dataset_name)
-
 
 def get_shuffle_idx(seed, size):
     np_rng = np.random.RandomState(seed=seed)

@@ -21,14 +21,17 @@ from transformers import (
 
 import deepspeed
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+from deepspeed import get_accelerator
 
 sys.path.append(
     os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
+
 from utils.data.data_utils_sft import create_prompt_dataset
 from utils.utils import print_rank_0, to_device, save_hf_format, set_random_seed, get_all_reduce_mean, get_optimizer_grouped_parameters, save_zero_three_model, load_hf_tokenizer
 from utils.ds_utils import get_train_ds_config
-from utils.module.lora import convert_linear_layer_to_lora, convert_lora_to_linear_layer, only_optimize_lora_parameters
+from utils.module.lora import convert_linear_layer_to_lora, convert_lora_to_linear_layer, only_optimize_lora_parameters, make_model_gradient_checkpointing_compatible
 from utils.model.model_utils import create_hf_model
+from utils.perf import print_throughput
 
 
 def parse_args():
@@ -36,7 +39,8 @@ def parse_args():
         description=
         "Finetune a transformers model on a causal language modeling task")
     parser.add_argument('--data_path',
-                        default="data",
+                        nargs='*',
+                        default=['Dahoas/rm-static'],
                         help='Path to the training dataset. Accepted format:'
                         '1) a single data path, 2) multiple datasets in the'
                         'form: dataset1-path dataset2-path ...')
@@ -143,6 +147,9 @@ def parse_args():
     parser.add_argument('--offload',
                         action='store_true',
                         help='Enable ZeRO Offload techniques.')
+    parser.add_argument('--dtype', type=str, default='fp16',
+                        choices=['fp16', 'bf16'],
+                        help = 'Training data type')
     parser.add_argument(
         '--zero_stage',
         type=int,
@@ -160,14 +167,26 @@ def parse_args():
     parser.add_argument('--only_optimize_lora',
                         action='store_true',
                         help='Only optimize the LoRA parameters.')
+    parser.add_argument(
+        "--lora_learning_rate",
+        type=float,
+        default=5e-4,
+        help=
+        "Initial LoRA learning rate (after the potential warmup period) to use."
+    )
+    ## Tensorboard logging
+    parser.add_argument('--enable_tensorboard',
+                        action='store_true',
+                        help='Enable tensorboard logging')
+    parser.add_argument('--tensorboard_path',
+                        type=str,
+                        default="step1_tensorboard")
+    ## Print loss
+    parser.add_argument('--print_loss',
+                        action='store_true',
+                        help='Prints loss at each step.')
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
-
-    # Validate settings
-    if args.gradient_checkpointing and args.lora_dim > 0:
-        assert (
-            not args.only_optimize_lora
-        ), "--gradient_checkpointing and --only_optimize_lora cannot be enabled at the same time."
 
     return args
 
@@ -176,10 +195,10 @@ def main():
     args = parse_args()
 
     if args.local_rank == -1:
-        device = torch.device("cuda")
+        device = torch.device(get_accelerator().device_name())
     else:
-        torch.cuda.set_device(args.local_rank)
-        device = torch.device("cuda", args.local_rank)
+        get_accelerator().set_device(args.local_rank)
+        device = torch.device(get_accelerator().device_name(), args.local_rank)
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         # torch.distributed.init_process_group(backend='nccl')
         deepspeed.init_distributed()
@@ -187,7 +206,11 @@ def main():
     args.global_rank = torch.distributed.get_rank()
 
     ds_config = get_train_ds_config(offload=args.offload,
-                                    stage=args.zero_stage)
+                                    dtype=args.dtype,
+                                    stage=args.zero_stage,
+                                    enable_tensorboard=args.enable_tensorboard,
+                                    tb_path=args.tensorboard_path,
+                                    tb_name="step1_model")
     ds_config[
         'train_micro_batch_size_per_gpu'] = args.per_device_train_batch_size
     ds_config[
@@ -199,10 +222,8 @@ def main():
 
     torch.distributed.barrier()
 
-    tokenizer = load_hf_tokenizer(args.model_name_or_path, fast_tokenizer=False)
-    tokenizer.pad_token = tokenizer.eos_token
-    # make sure tokenizer is right pad in our logic
-    tokenizer.padding_side = 'right'
+    # load_hf_tokenizer will get the correct tokenizer and set padding tokens based on the model family
+    tokenizer = load_hf_tokenizer(args.model_name_or_path, fast_tokenizer=True)
     model = create_hf_model(AutoModelForCausalLM,
                             args.model_name_or_path,
                             tokenizer,
@@ -214,6 +235,7 @@ def main():
                                              args.lora_dim)
         if args.only_optimize_lora:
             model = only_optimize_lora_parameters(model)
+            model = make_model_gradient_checkpointing_compatible(model)
 
     # Prepare the data
     train_phase = 1
@@ -226,9 +248,7 @@ def main():
         args.seed,
         tokenizer,
         args.max_seq_len,
-        end_of_conversation_token=tokenizer.eos_token,
-        sft_only_data_path=args.sft_only_data_path,
-        reload=True)
+        sft_only_data_path=args.sft_only_data_path)
     # DataLoaders creation:
     if args.local_rank == -1:
         train_sampler = RandomSampler(train_dataset)
@@ -239,13 +259,11 @@ def main():
     train_dataloader = DataLoader(train_dataset,
                                   collate_fn=default_data_collator,
                                   sampler=train_sampler,
-                                  batch_size=args.per_device_train_batch_size,
-                                  drop_last=True)
+                                  batch_size=args.per_device_train_batch_size)
     eval_dataloader = DataLoader(eval_dataset,
                                  collate_fn=default_data_collator,
                                  sampler=eval_sampler,
-                                 batch_size=args.per_device_eval_batch_size,
-                                 drop_last=True)
+                                 batch_size=args.per_device_eval_batch_size)
 
     def evaluation(model, eval_dataloader):
         model.eval()
@@ -270,7 +288,7 @@ def main():
 
     # Split weights in two groups, one with weight decay and the other not.
     optimizer_grouped_parameters = get_optimizer_grouped_parameters(
-        model, args.weight_decay)
+        model, args.weight_decay, args.lora_learning_rate)
 
     AdamOptimizer = DeepSpeedCPUAdam if args.offload else FusedAdam
     optimizer = AdamOptimizer(optimizer_grouped_parameters,
@@ -310,19 +328,22 @@ def main():
             f"Beginning of Epoch {epoch+1}/{args.num_train_epochs}, Total Micro Batches {len(train_dataloader)}",
             args.global_rank)
         model.train()
+        import time
         for step, batch in enumerate(train_dataloader):
+            start = time.time()
             batch = to_device(batch, device)
             outputs = model(**batch, use_cache=False)
             loss = outputs.loss
+            if args.print_loss:
+                print(
+                    f"Epoch: {epoch}, Step: {step}, Rank: {torch.distributed.get_rank()}, loss = {loss}"
+                )
             model.backward(loss)
             model.step()
-
-            if step % 10 == 9:
-                try:
-                    loss = get_all_reduce_mean(loss).item()
-                except:
-                    pass
-                print_rank_0(f"Training Epoch {epoch+1}/{args.num_train_epochs} Iter {step+1}/{len(train_dataloader)}: Loss={loss} ", args.global_rank)
+            end = time.time()
+            if torch.distributed.get_rank() == 0:
+                print_throughput(model.model, args, end - start,
+                                 args.global_rank)
 
         # Evaluate perplexity on the validation set.
         print_rank_0(

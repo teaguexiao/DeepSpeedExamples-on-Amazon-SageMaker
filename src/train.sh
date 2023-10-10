@@ -28,13 +28,16 @@ if [ "$ZERO_STAGE" == "" ]; then
 fi
 mkdir -p $OUTPUT
 
-deepspeed main.py \
+#if you are using standard dataset on HF, use main.py
+#if you are using custom dataset, use main_sft.py
+
+deepspeed main_sft.py \
    --data_path local/jsonfile \
    --data_split 10,0,0 \
    --model_name_or_path /tmp/llama-2-7B-fp16/ \
    --per_device_train_batch_size 2 \
    --per_device_eval_batch_size 2 \
-   --max_seq_len 512 \
+   --max_seq_len 4096 \
    --learning_rate 9.65e-6 \
    --weight_decay 0. \
    --num_train_epochs 2  \
@@ -46,8 +49,9 @@ deepspeed main.py \
    --zero_stage $ZERO_STAGE \
    --deepspeed \
    --output_dir $OUTPUT \
-   --print_loss
-   
+   --print_loss \
+   --offload
+
 #   --model_name_or_path TheBloke/Llama-2-13B-fp16 \
 #   --model_name_or_path /tmp/Llama-2-13B-fp16/ \
 #&> $OUTPUT/training.log
